@@ -1,3 +1,4 @@
+
 import { createClient } from '@supabase/supabase-js';
 
 let supabaseUrl = 'https://uaxwrnjlttlohwcgwabx.supabase.co';
@@ -8,8 +9,13 @@ try {
   if (typeof import.meta !== 'undefined' && import.meta.env) {
     // @ts-ignore
     const env = import.meta.env;
-    supabaseUrl = env.VITE_SUPABASE_URL || '';
-    supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY || '';
+    // Only overwrite if the environment variable is actually defined
+    if (env.VITE_SUPABASE_URL) {
+        supabaseUrl = env.VITE_SUPABASE_URL;
+    }
+    if (env.VITE_SUPABASE_ANON_KEY) {
+        supabaseAnonKey = env.VITE_SUPABASE_ANON_KEY;
+    }
   }
 } catch (error) {
   console.warn("Error reading environment variables:", error);
