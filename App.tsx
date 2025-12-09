@@ -1,4 +1,3 @@
-
 import React, { useState, useMemo, useEffect } from 'react';
 import { calculateClassStatistics, processStudentData, calculateFacilitatorStats } from './utils';
 import { GlobalSettings, StudentData, Department, Module, SchoolClass } from './types';
@@ -10,6 +9,7 @@ import DaycareReportCard from './components/DaycareReportCard';
 import ScoreEntry from './components/ScoreEntry';
 import FacilitatorDashboard from './components/FacilitatorDashboard';
 import GenericModule from './components/GenericModule';
+import { supabase } from './supabaseClient';
 
 const DEFAULT_SETTINGS: GlobalSettings = {
   schoolName: "UNITED BAYLOR ACADEMY",
@@ -75,6 +75,9 @@ const App: React.FC = () => {
   const [activeClass, setActiveClass] = useState<SchoolClass>("Basic 9");
   const [activeModule, setActiveModule] = useState<Module>("Examination");
   
+  // Loading State
+  const [isLoading, setIsLoading] = useState(true);
+
   // Update active class when department changes
   useEffect(() => {
      const availableClasses = DEPARTMENT_CLASSES[activeDept];
@@ -89,52 +92,90 @@ const App: React.FC = () => {
   // Examination Module Sub-Tabs (New feature)
   const [examSubTab, setExamSubTab] = useState<'timetable' | 'invigilators' | 'results' | 'indicators' | 'subjects'>('results');
 
-  // Settings State
-  const [settings, setSettings] = useState<GlobalSettings>(() => {
-    const saved = localStorage.getItem('uba_app_settings');
-    let parsed = saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
-    
-    // Migration: Populate staffList from existing mapping if empty
-    if (!parsed.staffList || parsed.staffList.length === 0) {
-        const generatedStaff: any[] = [];
-        const seenNames = new Set();
-        Object.entries(parsed.facilitatorMapping || {}).forEach(([subj, name]: [string, any]) => {
-            if (name && !seenNames.has(name)) {
-                generatedStaff.push({
-                    id: Date.now().toString() + Math.random(),
-                    name: name,
-                    role: 'Subject Teacher',
-                    status: 'Full Time',
-                    subjects: [subj],
-                    contact: '',
-                    qualification: ''
-                });
-                seenNames.add(name);
-            } else if (name) {
-                // Find existing and add subject
-                const staff = generatedStaff.find(s => s.name === name);
-                if (staff && !staff.subjects.includes(subj)) {
-                    staff.subjects.push(subj);
-                }
-            }
-        });
-        parsed.staffList = generatedStaff;
-    }
-    
-    return parsed;
-  });
+  // Settings State - Init with defaults, then load
+  const [settings, setSettings] = useState<GlobalSettings>(DEFAULT_SETTINGS);
 
   // Student Data State - Central Source of Truth for Enrolment and Scores
-  const [students, setStudents] = useState<StudentData[]>(() => {
-    const saved = localStorage.getItem('uba_app_students');
-    if (!saved) return RAW_STUDENTS.map(s => ({
-        ...s,
-        scoreDetails: {} 
-    }));
-    return JSON.parse(saved);
-  });
+  const [students, setStudents] = useState<StudentData[]>([]);
 
   const [zoomLevel, setZoomLevel] = useState(1.0);
+
+  // Load Data from Supabase on Mount
+  useEffect(() => {
+    const fetchData = async () => {
+      setIsLoading(true);
+      try {
+        // 1. Fetch Settings
+        const { data: settingsData, error: settingsError } = await supabase
+          .from('settings')
+          .select('payload')
+          .eq('id', 1)
+          .single();
+
+        if (settingsData && settingsData.payload) {
+            // Merge defaults in case of new fields
+            const loadedSettings = { ...DEFAULT_SETTINGS, ...settingsData.payload };
+            
+            // Logic for staffList migration (if needed from older saves)
+            if (!loadedSettings.staffList || loadedSettings.staffList.length === 0) {
+                 const generatedStaff: any[] = [];
+                 const seenNames = new Set();
+                 Object.entries(loadedSettings.facilitatorMapping || {}).forEach(([subj, name]: [string, any]) => {
+                    if (name && !seenNames.has(name)) {
+                        generatedStaff.push({
+                            id: Date.now().toString() + Math.random(),
+                            name: name,
+                            role: 'Subject Teacher',
+                            status: 'Full Time',
+                            subjects: [subj],
+                            contact: '',
+                            qualification: ''
+                        });
+                        seenNames.add(name);
+                    } else if (name) {
+                        const staff = generatedStaff.find(s => s.name === name);
+                        if (staff && !staff.subjects.includes(subj)) {
+                            staff.subjects.push(subj);
+                        }
+                    }
+                });
+                loadedSettings.staffList = generatedStaff;
+            }
+            setSettings(loadedSettings);
+        } else if (settingsError && settingsError.code !== 'PGRST116') {
+             // PGRST116 is "Row not found", which is fine for first run
+             console.error("Error fetching settings:", JSON.stringify(settingsError));
+        }
+
+        // 2. Fetch Students
+        const { data: studentsData, error: studentsError } = await supabase
+          .from('students')
+          .select('payload');
+
+        if (studentsData && studentsData.length > 0) {
+            // Map payload back to student objects
+            const loadedStudents = studentsData.map((row: any) => row.payload);
+            setStudents(loadedStudents);
+        } else {
+             if (studentsError && studentsError.code !== 'PGRST116') {
+                console.error("Error fetching students:", JSON.stringify(studentsError));
+             }
+            // First run? Use Raw Constants
+            const initialStudents = RAW_STUDENTS.map(s => ({
+                ...s,
+                scoreDetails: {} 
+            }));
+            setStudents(initialStudents);
+        }
+      } catch (err: any) {
+          console.error("Unexpected error loading data:", err);
+      } finally {
+          setIsLoading(false);
+      }
+    };
+
+    fetchData();
+  }, []);
 
   // Check Department Type
   const isEarlyChildhood = activeDept === "Daycare" || activeDept === "Nursery" || activeDept === "Kindergarten";
@@ -167,10 +208,38 @@ const App: React.FC = () => {
     setSettings(prev => ({ ...prev, [key]: value }));
   };
 
-  const handleSave = () => {
-    localStorage.setItem('uba_app_settings', JSON.stringify(settings));
-    localStorage.setItem('uba_app_students', JSON.stringify(students));
-    alert("Changes saved successfully!");
+  const handleSave = async () => {
+    setIsLoading(true);
+    try {
+        // 1. Save Settings
+        const { error: settingsError } = await supabase
+            .from('settings')
+            .upsert({ id: 1, payload: settings });
+        
+        if (settingsError) throw settingsError;
+
+        // 2. Save Students
+        // We upsert all students. 
+        // Note: If you delete a student in UI, this doesn't strictly delete from DB unless we handle deletions explicitly.
+        // For a simple sync, this usually works for updates/adds.
+        const studentRows = students.map(s => ({
+            id: s.id,
+            payload: s
+        }));
+
+        const { error: studentsError } = await supabase
+            .from('students')
+            .upsert(studentRows);
+
+        if (studentsError) throw studentsError;
+
+        alert("Data saved successfully to Supabase!");
+    } catch (err: any) {
+        console.error("Save error details:", JSON.stringify(err));
+        alert(`Error saving data: ${err.message || "Unknown error (check console)"}`);
+    } finally {
+        setIsLoading(false);
+    }
   };
 
   // Sync function passed to Report Cards
@@ -255,6 +324,18 @@ const App: React.FC = () => {
       return activeModule;
   };
 
+  if (isLoading) {
+      return (
+          <div className="min-h-screen flex items-center justify-center bg-gray-100">
+              <div className="text-center">
+                  <div className="w-16 h-16 border-4 border-blue-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+                  <h2 className="text-xl font-bold text-gray-700">Loading United Baylor Academy System...</h2>
+                  <p className="text-gray-500">Connecting to database...</p>
+              </div>
+          </div>
+      );
+  }
+
   return (
     <div className="min-h-screen bg-gray-100 font-sans flex flex-col">
       {/* 1. Top Level: Department Navigation */}
@@ -282,7 +363,7 @@ const App: React.FC = () => {
             </div>
              <div className="flex gap-2">
                  <button onClick={handleSave} className="text-yellow-400 hover:text-yellow-300" title="Save All Data">
-                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
+                     <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1-2-2v-4"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
                  </button>
             </div>
           </div>
